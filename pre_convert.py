@@ -22,81 +22,127 @@ import itertools
 
 # 前置框架
 class PreConverter:
-    INDEX_DIM_DEFAULTS_DICT = {}
+    index_dim_default_dict: Dict[str, List[str]] = {}
+    freq_match_df: pd.DataFrame = pd.DataFrame()
+    is_initialized: bool = False
     index_split: pd.DataFrame = pd.DataFrame()
     day_values: List[str] = []
     dim_map: Dict[str, str] = {}
     table_model_dict: Dict[str, Any] = {}
     middle_index_name_code_dict: Dict[str, str] = {}
 
-    @classmethod
-    def init(cls):
-        # 初始化 INDEX_DIM_DEFAULTS_DICT
-        cls.INDEX_DIM_DEFAULTS_DICT = {
-            "统计口径": ["当月", "当日", "月累计", "年累计"],
-            "投诉流程": ["整体投诉"],
-            "投保环节": ["承保"],
-            "指标保单类型": [None],
-            "渠道": ["监管全量"],
-            "客户类型": ["全量"],
-            "主题": ["主题"],
-        }
-
-        # 初始化 index_split DataFrame
-        cls.index_split = pd.DataFrame([
-            {
-                "元子指标名称": "监管投诉引导率",
-                "意图": "个险_投诉日报_按受理时间",
-                "统计口径": "当月",
-                "频率": "月",
-                "捷报名称": "监管投诉引导率",
-                "中台中文名称": "监管投诉引导率",
-                "绑定维度(可忽略)": "投诉流程;投保环节;指标保单类型",
-                "中台指标编码": "INDEX_CODE_1",
-                "投诉流程": "整体投诉",
-                "投保环节": "承保",
-                "指标保单类型": None,
-            },
-        ])
-
-        # 初始化 day_values 列表
-        cls.day_values = ["日", "号", "天"]
-
-        # 初始化 dim_map 字典
-        cls.dim_map = {
-            "个险_投诉日报_按受理时间监管投诉引导率": "投诉流程;投保环节;指标保单类型",
-        }
-
-        # 初始化 table_model_dict 字典
-        cls.table_model_dict = {
-            "个险_投诉日报_按受理时间意图": None,
-        }
-
-        # 初始化 middle_index_name_code_dict 字典
-        cls.middle_index_name_code_dict = {
-            "个险_投诉日报_按受理时间监管投诉引导率": "INDEX_CODE_1",
-        }
+    df_topic: pd.DataFrame = pd.DataFrame()
+    RENAME_MAP: dict = {}
+    df_topic_path: str = ""
 
     @classmethod
-    def _find_frequency_keyword(cls, user_question, default_freq=None, standard_index_name=None):
-        if re.search(r'(?:日|号|当日)', user_question):
-            return '日'
-        if re.search(r'(?:月|当月|本月|下月|下下月)', user_question):
-            return '月'
-        if re.search(r'(?:年|今年|明年)', user_question):
-            return '年'
-        if re.search(r'(?:季|季度)', user_question):
-            return '季'
-        return default_freq or '月'
+    async def init(cls):
+        if cls.is_initialized:
+            return
 
-    @classmethod
-    async def _prior_elements(cls, lst):
-        if not lst:
-            return lst
-        priority = ['通用', '绩优', '产品']
-        ordered = [item for item in priority if item in lst]
-        ordered.extend([item for item in lst if item not in ordered])
-        return ordered
+        if not DataLoader.is_initialized:
+            await DataLoader.init()
+
+        cls.table_names = copy.deepcopy(DataLoader.table_names_chinese)
+
+        cls.index_df = DataLoader.index_df.copy()
+        # safe guards: DataLoader may not have populated index_df in test environment
+
+        cls.index_type_dict = dict(zip(cls.index_df["指标名称"], cls.index_df["指标类型"]))
+        cls.index_intention_df = DataLoader.index_intention_df.copy()
+
+        index_type_default = cls.index_df[cls.index_df["指标优先级"] == 1].drop_duplicates()
+        index_type_default_grp = index_type_default.groupby("指标类型")["指标名称"].agg(list).reset_index()
+        cls.index_type_default_dict = dict(zip(index_type_default_grp["指标类型"], index_type_default_grp["指标名称"]))
+
+        exclude_index_types = cls.index_df[cls.index_df["指标指向维度"] == cls.index_df["指标指向维度"]]
+        cls.exclude_index_types_dict = dict(zip(exclude_index_types["指标类型"], exclude_index_types["指标指向维度"]))
+
+        index_df_dropdown = cls.index_df[cls.index_df["是否坍缩"] == 1].copy()
+        cls.index_dropdown = list(index_df_dropdown["指标名称"].dropna().astype(str))
+        cls.table_dropdown = list(index_df_dropdown["指标来源"].dropna().astype(str))
+        # cls.dropdown_dict = {
+        #     "C_SHELF_YIELD_TYPE": "收益率类型",
+        #     "C_SHELF_YIELD": "收益率取值"
+        # }
+
+        index_default = DataLoader.index_default.copy()
+
+        for index, row in index_default.iterrows():
+            if row["默认值"] == row["默认值"]:
+                cls.index_dim_default_dict[row["维度"]] = [row["默认值"]]
+            else:
+                cls.index_dim_default_dict[row["维度"]] = []
+
+        cls.index_split = DataLoader.index_split.copy()
+        cls.filter_index_list = list(set(list(cls.index_split[cls.index_split["意图"] == "绩优"]["元子指标名称"])))
+        cls.index_split_dict = dict(zip(cls.index_split["中台中文名称"], cls.index_split["频率"]))
+
+        table_model = DataLoader.table_model.copy()
+        cls.table_model_dict = dict(zip(table_model["意图配置"], table_model["表模型"]))
+
+        cls.freq_match_df = DataLoader.freq_match_df.copy()
+        cls.day_values = [value for value in DataLoader.attr_df["维值"] if re.findall(r'(?:日|号|天)', value)]
+        cls.day_values = list(set(cls.day_values))
+
+        cls.index_split["意图中台中文名称"] = cls.index_split["意图"] + cls.index_split["中台中文名称"]
+        cls.middle_index_name_code_dict = dict(zip(cls.index_split["意图中台中文名称"],
+                                                   cls.index_split["中台指标编码"]))
+
+        dim_data = DataLoader.dim_data[DataLoader.dim_data["dimname"] == "主题"].copy()
+        topic_names = dim_data["dimvalue"]
+        exclude_topic_names1 = [topic for topic in topic_names if "率" not in topic]
+        synonym_df = DataLoader.synonym_df.copy()
+        synonym_df = synonym_df[synonym_df["column_name"] == "主题"].copy()
+        exclude_topic_names2 = []
+        for index, row in synonym_df.iterrows():
+            synonym_list = row["synonym"].split(";")
+            for syn in synonym_list:
+                if "件" not in syn and "率" not in syn:
+                    exclude_topic_names2.append(syn)
+        cls.exclude_topic_names = exclude_topic_names1 + exclude_topic_names2
+
+        ##0806增加
+        if not cls.index_split.empty and "绑定维度(可忽略)" in cls.index_split.columns:
+            temp_split = cls.index_split.dropna(subset=["绑定维度(可忽略)"])
+            cls.dim_map = dict(zip(temp_split["意图"] + temp_split["元子指标名称"], temp_split["绑定维度(可忽略)"]))
+        else:
+            temp_split = pd.DataFrame()
+            cls.dim_map = {}
+
+        ##0905增加 默认维度的添加字典
+
+        cls.is_initialized = True
+
+        # IE初始化完成
+        # topic初始化
+
+        try:
+            tmp = Util.read_excel(Util.get_abs_path(cls.df_topic_path))
+            cls.df_topic = tmp.rename(columns=cls.RENAME_MAP) if tmp is not None else pd.DataFrame()
+        except Exception:
+            cls.df_topic = pd.DataFrame()
+
+        if "is_online" in cls.df_topic.columns:
+            cls.df_topic = cls.df_topic[cls.df_topic["is_online"] == 1].copy()
+
+        # 对于无【带维度的捷报别称】指标，通过index_split的中台指标id匹配捷报别称
+        if hasattr(DataLoader, 'index_split') and not DataLoader.index_split.empty and "中台指标编码" in DataLoader.index_split.columns and "捷报别称" in DataLoader.index_split.columns:
+            index_code_alias_dict = dict(zip(DataLoader.index_split["中台指标编码"], DataLoader.index_split["捷报别称"]))
+        else:
+            index_code_alias_dict = {}
+
+        new_alias = [row.get("index_name_alias") if row.get("index_name_alias") == row.get("index_name_alias")
+                     else index_code_alias_dict.get(row.get("index_code"), "xxx")
+                     for index, row in cls.df_topic.to_dict(orient='index').items()]
+        new_parent_alias = [
+            row.get("parent_index_name_alias") if row.get("parent_index_name_alias") == row.get("parent_index_name_alias")
+            else index_code_alias_dict.get(row.get("parent_index_code"), None)
+            for index, row in cls.df_topic.to_dict(orient='index').items()
+        ]
+        if not cls.df_topic.empty:
+            cls.df_topic["index_name_alias"] = new_alias
+            cls.df_topic["parent_index_name_alias"] = new_parent_alias
 
     @classmethod
     async def execute(cls, state: PipelineState) -> PipelineState:
@@ -128,6 +174,166 @@ class PreConverter:
 
         return state
 
+    @classmethod
+    def _get_index_name(
+            cls,
+            match_index: pd.DataFrame,
+            user_input: str,
+            attr_list=None,
+            flop=True
+    ):
+        df_index = match_index.copy()
+        if attr_list is not None:
+            df_index = match_index[match_index.get('index_name', pd.Series()).isin(attr_list)].copy()
+
+        # If freq match dataframe is empty or missing expected columns, return no keyword hit
+        if df_index.empty or not {'index_name', 'index_nick_name', 'is_period'}.issubset(set(df_index.columns)):
+            return 0, set()
+
+        match_index_list = df_index[['index_name', 'index_nick_name', 'is_period']].dropna(subset=['index_nick_name']).to_dict(orient='records')
+        period = df_index[['period_name', 'period_nick_name']].dropna(subset=['period_nick_name']).to_dict(orient='records')
+
+        index_name_list = []
+        index_nick_name_list = []
+        for i in range(len(match_index_list)):
+            is_period = match_index_list[i]['is_period']
+            index_name = match_index_list[i]['index_name']
+            index_nick_name = match_index_list[i]['index_nick_name']
+
+            if is_period == 0:
+                index_name_list.append(index_name)
+                index_nick_name_list.append(index_nick_name)
+            else:
+                for j in range(len(period)):
+                    period_name = period[j]['period_name']
+                    period_nick_name = period[j]['period_nick_name']
+                    index_name_list.append(period_name + index_name)
+                    index_nick_name_list.append(period_nick_name + index_nick_name)
+                    if flop:
+                        index_name_list.append(index_name + period_name)
+                        index_nick_name_list.append(index_nick_name + period_nick_name)
+        index_mapping = pd.DataFrame([index_name_list, index_nick_name_list]).T
+        index_mapping.columns = ['index_name', 'index_nick_name']
+        index_mapping['lens'] = index_mapping.index_nick_name.apply(lambda x: len(x))
+        index_mapping.sort_values(by='lens', ascending=False, inplace=True)
+
+        # 从问题中提取指标
+        pat = re.compile(
+            '(?:' + '|'.join(index_mapping['index_nick_name'].tolist()).replace(r'(', '\(').replace(')', '\)') + ')')
+        if re.findall(pat, user_input):
+            index_name = ''
+            for i in index_mapping['index_nick_name'].tolist():
+                if i in user_input:
+                    if len(i) > len(index_name):
+                        index_name = i
+            # 指标出现在问题中，且不属于之前的指标
+            # 收益率 √ 收益 ×
+            index_name_all = []
+            for i in index_mapping['index_nick_name']:
+                # for i in ['各条线', '各月']:
+                if i in user_input:
+                    if index_name_all:
+                        for j in index_name_all:
+                            if i in j:
+                                break
+                            index_name_all.append(i)
+                    else:
+                        index_name_all.append(i)
+
+            # 跨度
+            pe_all = []
+            idx_all = []
+            for index_name in index_name_all:
+                pe = {'period_name': '', 'period_nick_name': ''}
+                for p in period:
+                    if p['period_nick_name'] in index_name:
+                        if len(p['period_nick_name']) > len(pe['period_nick_name']):
+                            pe = p
+                pe_all.append(pe)
+                index_name = index_name.replace(pe['period_nick_name'], '')
+                # 指标名称
+                idx = {'index_name': '', 'index_nick_name': ''}
+                for i in match_index_list:
+                    if i['index_nick_name'] in index_name:
+                        if len(i['index_nick_name']) > len(idx['index_nick_name']):
+                            idx = i
+                idx_all.append(idx)
+            return 1, pe_all, idx_all
+        else:
+            import difflib
+
+            index_mapping['simi_ratio'] = index_mapping.index_nick_name.apply(
+                lambda x: difflib.SequenceMatcher(None, x, user_input).quick_ratio())
+            simi_index = index_mapping.sort_values(by='simi_ratio', ascending=False)['index_name'].tolist()[:3]
+            simi_index = set(simi_index)
+            return 0, simi_index
+
+    @classmethod
+    def _check_order(cls, date_str):
+        index_day = date_str.find('日')
+        index_month = date_str.find('月')
+
+        if index_day == -1 and index_month == -1:
+            return None
+        elif index_day == -1:
+            return "月"
+        elif index_month == -1:
+            return "日"
+        elif index_day < index_month:
+            return "日"
+        else:
+            return "月"
+        
+    @classmethod
+    def _find_frequency_keyword(cls, user_question, default_freq=None, standard_index_name=None):
+        """
+        先通过关键词找频率，然后输出指标对应频率，最后返回默认值
+        """
+        if standard_index_name is not None:
+            # 输出指标对应频率
+            naive_freq = cls.index_split_dict.get(standard_index_name, None)
+            if naive_freq is not None and naive_freq == naive_freq and naive_freq:
+                return naive_freq
+
+            # 通过关键词找频率
+            word_res = cls._get_index_name(cls.freq_match_df, user_question, flop=False)
+            idns = []
+            if word_res[0] == 1 and len(word_res[2]) > 0:  # 命中关键词
+                idns = [i["index_name"] for i in word_res[2]]
+            idns = list(set(idns))
+            if len(idns) == 1:
+                return idns[0]
+
+            # 通过顺序规则找频率
+            word_freq = cls._check_order(standard_index_name)
+            if word_freq is not None:
+                return word_freq
+
+        # 通过关键词找频率
+        word_res = cls._get_index_name(cls.freq_match_df, user_question, flop=False)
+        idns = []
+        if word_res[0] == 1 and len(word_res[2]) > 0:  # 命中关键词
+            idns = [i["index_name"] for i in word_res[2]]
+        idns = list(set(idns))
+        if len(idns) == 1:
+            return idns[0]
+
+        # 最后返回默认值
+        if default_freq is not None:
+            return default_freq
+
+        return "无"
+
+    @classmethod
+    async def _prior_elements(cls, lst):
+        if not lst:
+            return lst
+        priority = ['通用', '绩优', '产品']
+        ordered = [item for item in priority if item in lst]
+        ordered.extend([item for item in lst if item not in ordered])
+        return ordered
+
+   
     # HIGH PRIORITY 指标-1
     @classmethod
     async def question_rewrite(cls, question: str) -> str:
@@ -495,7 +701,7 @@ class PreConverter:
                 org_word = av.get('org_word')
                 for we in av.get('word_list', []):
                     cname = we.get('columns_name')
-                    if cname not in cls.INDEX_DIM_DEFAULTS_DICT.keys() and \
+                    if cname not in cls.index_dim_default_dict.keys() and \
                         cname != '主题':
                         # 原生维度保留（暂不修改operator，让答案拼接直接处理）
                         # +++++++++++++++++++++++++++++++++++++++++++++++
@@ -542,7 +748,7 @@ class PreConverter:
             for ao in attr_objs:
                 new_word_list = []
                 for we in ao.get('word_list', []):
-                    if we.get('word') not in cls.INDEX_DIM_DEFAULTS_DICT.keys() and we.get('word') != '主题':
+                    if we.get('word') not in cls.index_dim_default_dict.keys() and we.get('word') != '主题':
                         # 原生维度保留，指标维度删除
                         new_word_list.append(we)
                     ##0710 当模型维度和用户维度重叠时
@@ -995,11 +1201,34 @@ class PreConverter:
         return new_ret, new_question_info_list, record
     
     @classmethod
-    async def _get_topic_index(cls, current_topic, current_intention):
-        """Return list of index codes for a topic (uses cls.df_topic if available)."""
-        if hasattr(cls, 'df_topic') and isinstance(cls.df_topic, pd.DataFrame) and not cls.df_topic.empty:
-            return list(set(cls.df_topic[cls.df_topic["topic"] == current_topic]["index_code"]))
-        return []
+    async def _get_topic_index(
+            cls,
+            topic_name: str,
+            intention_name: str = None
+    ):
+        """
+        返回指标的主题信息。
+        Args:
+            topic_name: 主题名称
+            intention_name: 意图名称
+        Returns:
+            主题对应的主指标列表
+        """
+        if intention_name is not None and "intention_name" in cls.df_topic.columns:
+            df_tmp = cls.df_topic[(cls.df_topic["topic"] == topic_name) &
+                                  (cls.df_topic["intention_name"] == intention_name)].copy()
+        else:
+            df_tmp = cls.df_topic[cls.df_topic["topic"] == topic_name].copy()
+        if df_tmp.shape[0] < 1:
+            return []
+        if "tag_level" in df_tmp.columns:
+            index_code_list = list(set(df_tmp[df_tmp["tag_level"] == 0]["index_code"]))
+        else:
+            index_code_list = list(set(df_tmp["index_code"]))
+        # intention_list = list(set(dim_tmp["tablename"]))
+        # intention_list = await IndexExtraction._prior_elements(intention_list)
+
+        return index_code_list
 
     # HIGH PRIORITY 指标-4
     @classmethod
@@ -1292,154 +1521,3 @@ class PreConverter:
             return ref_dict
 
         return {}
-    
-    async def dim_priority_check(self, question: str) -> str:
-        """维度重合时的表优先级
-
-        solution:
-            1.后置模块
-            2.rewrite from affix_search.py: search_words
-
-        """
-        return question
-    
-    async def format_convert(self, question: str) -> str:
-        """结果类型
-        
-        background:
-            返回的结果有：未识别指标、维度不支持、二次确认等
-
-        solution:
-            1. learn from restful.py: direct_chat
-        """
-        return question
-    
-    async def time_info_recognize(self, question: str) -> str:
-        """时间类型等识别
-        
-        background:
-            获取时间类型识别，时间频率
-
-        solution:
-            1. learn from time_extraction_dev.py
-            2. 跟@德劲确认
-        """
-        return question
-    
-    # MARK: 捷报
-    @classmethod
-    def _jb_data_input_type_convert_recognize(cls, question: str) -> str:
-        dummy_filed = ['query_number', 'analysis']
-        return "other"
-
-    @classmethod
-    async def jb_data_input_convert(cls, question: str) -> str:
-        dummy_question_type = cls._jb_data_input_type_convert_recognize(question)
-        return question
-
-
-if __name__ == "__main__":
-    def _build_debug_attr_results():
-        table_name = "个险_投诉日报_按受理时间"
-        index_name = "监管投诉引导率"
-
-        return [
-            {
-                "attrVal": [
-                    {
-                        "org_word": "其他",
-                        "word_list": [
-                            {
-                                "word": "其他",
-                                "columns": "user_accept_method_desc",
-                                "columns_name": "受理方式描述(投诉方式)",
-                                "table_name": table_name,
-                                "operator": "in",
-                            },
-                            {
-                                "word": "其他",
-                                "columns": "user_business_src_desc",
-                                "columns_name": "业务来源描述",
-                                "table_name": table_name,
-                                "operator": "in",
-                            },
-                        ],
-                    }
-                ],
-                "attrObj": [],
-                "indexResult": {
-                    index_name: [
-                        {
-                            "indexName": [index_name],
-                            "indexCode": [index_name],
-                            "tableName": table_name,
-                            "msg": f"指标“{index_name}”定义清晰，匹配到“{index_name}”",
-                        }
-                    ]
-                },
-                "llmAnswer": {"问题类型": "寿险", "句子拆解": []},
-            },
-            {
-                "attrVal": [
-                    {
-                        "org_word": "其他",
-                        "word_list": [
-                            {
-                                "word": "其他",
-                                "columns": "user_accept_source_desc",
-                                "columns_name": "受理来源描述",
-                                "table_name": table_name,
-                                "operator": "in",
-                            }
-                        ],
-                    }
-                ],
-                "attrObj": [],
-                "indexResult": {
-                    index_name: [
-                        {
-                            "indexName": [index_name],
-                            "indexCode": [index_name],
-                            "tableName": table_name,
-                            "msg": f"指标“{index_name}”定义清晰，匹配到“{index_name}”",
-                        }
-                    ]
-                },
-                "llmAnswer": {"问题类型": "寿险", "句子拆解": []},
-            },
-        ]
-
-    def _build_debug_state():
-        return PipelineState(
-            request_id="debug-request",
-            question="其他长期寿险-非获客类的监管投诉引导率贡献率。",
-            database_id="debug-db",
-        )
-
-    async def _main():
-        PreConverter.init()
-        state = _build_debug_state()
-        attribute_results = _build_debug_attr_results()
-
-        print("[before convert]", state.question)
-        state = await PreConverter.execute(state)
-        print("[after convert]", state.question)
-
-        # index_convert was already invoked inside execute; no need to call it again here.
-
-        class DataLoader:
-            table_names = ['捷报_寿险整体', '捷报_个险', '捷报_银保', '捷报_网格', '捷报_新渠道', '客户']
-
-        print("[sample attr_results count]", len(attribute_results))
-        print("[sample attr_results[0].indexResult keys]", list(attribute_results[0]["indexResult"].keys()))
-
-        ret = await PreConverter.index_resolve(
-            state=state, attr_results = attribute_results,
-            valid_table_scopes=list(
-                set(DataLoader.table_names) - 
-                set(['捷报_寿险整体', '捷报_个险', '捷报_银保', '捷报_网格', '捷报_新渠道']) - {"客户"}
-                )
-            )
-        print("[index_resolve outputs]", ret)
-
-    asyncio.run(_main())
